@@ -9,24 +9,21 @@ users = [
     {'user': 'latin',
     'password':'123'}
 ]
+cur_dir = './server_fs'
 
 class ControlHandler:
-    def __init__(self, server):
+    def __init__(self, socket, server):
         self.sock = socket
         self.bufsize = bufsize
         self.user_wait = {}
         self.login_users = {}
         self.init()
         self.server = server
+        self.data_sock = None
 
     def init(self):
         self.init_db()
         self.cmd_to_handler = self.get_map()
-
-    def set_socket(self, socket, fd):
-        self.sock = socket
-        self.fd = fd
-        self.conn_state = True
 
     def init_db(self):
         self.session = session
@@ -37,6 +34,7 @@ class ControlHandler:
             'PASS': self.handle_PASS,
             'PORT': self.handle_PORT,
             'STOR': self.handle_STOR,
+            'RETR': self.handle_RETR,
         }
 
     def handle(self):
@@ -46,20 +44,6 @@ class ControlHandler:
         else:
             resp = self.make_response(req)
             self.send_message(resp)
-
-    def recv_message(self):
-        data = b''
-        try:
-            while True:
-                buf = self.sock.recv(self.bufsize)
-                if self.is_EOF(buf):
-                    self.is_connected = False
-                    break
-                data += buf
-        except BlockingIOError:
-            pass
-        message = data.decode()
-        return message
 
     def make_response(self, request):
         self.request = request
@@ -105,21 +89,76 @@ class ControlHandler:
     def handle_PORT(self, addr):
         addr = addr.split(',')
         host = addr[0]
-        port = addr[1]
+        port = int(addr[1])
         addr = (host, port)
         if not self.is_login():
             resp = '530 Not logged in'
         else:
-            try:
-                self.data_sock, self.data_fd = self.server.create_data_sock(addr)
+            server_addr = self.sock.getsockname()[0], 20
+            client_addr = addr
+            data_sock = self.server.create_data_sock(client_addr, server_addr)
+            if data_sock:
+                self.data_sock = data_sock
                 resp = '200 Command okay'
-            except ConnectionRefusedError:
+            else:
                 resp = '501 Syntax error in parameters or arguments'
         return resp
 
     def handle_STOR(self, pathname):
-        resp = 'ok'
+        if not self.is_login():
+            resp = '530 Not logged in'
+        else:
+            self.make_data_connect()
+            if not self.enable_data_connect():
+                resp = '425 Can\'t open data connection'
+            else:
+                resp = '125 Data connection already open; transfer starting'
+                self.send_message(resp)
+
+                data = self.recv_data_block(self.data_sock)
+                if data == b'':
+                    resp = '426 Connection closed; transfer aborted'
+                    return resp
+                path = '%s/%s' %(cur_dir, pathname)
+                try:
+                    with open(path, 'wb') as f:
+                        f.write(data)
+                    resp = '226 Closing data connection.Requested file action successful'
+                except IOError:
+                    resp = '451 Requested action aborted: local error in processing'
+
         return resp
+
+    def handle_RETR(self, pathname):
+        if not self.is_login():
+            resp = '530 Not logged in'
+        else:
+            self.make_data_connect()
+            if not self.enable_data_connect():
+                resp = '425 Can\'t open data connection'
+            else:
+                resp = '125 Data connection already open; transfer starting'
+                self.send_message(resp)
+
+                path = '%s/%s' %(cur_dir, pathname)
+                try:
+                    with open(path, 'rb') as f:
+                        data = f.read()
+                        self.data_sock.sendall(data)
+                        self.data_sock.close()
+                    resp = '226 Closing data connection.Requested file action successful'
+                except IOError:
+                    resp = '451 Requested action aborted: local error in processing'
+        return resp
+
+
+    def make_data_connect(self):
+        server_addr = self.sock.getsockname()[0], 20
+        client_addr = self.sock.getpeername()
+        self.data_sock = self.server.create_data_sock(client_addr, server_addr)
+
+    def enable_data_connect(self):
+        return self.data_sock is not None
 
     def is_login(self):
         for sock in self.login_users.keys():
@@ -134,13 +173,43 @@ class ControlHandler:
         data = message.encode()
         self.sock.sendall(data)
 
+    def recv_message(self, sock=None):
+        if sock is None:
+            sock = self.sock
+        data = b''
+        try:
+            while True:
+                buf = sock.recv(self.bufsize)
+                if self.is_EOF(buf):
+                    self.is_connected = False
+                    break
+                data += buf
+        except BlockingIOError:
+            pass
+        message = data.decode()
+        return message
+
+    def recv_data_block(self, sock):
+        data = b''
+        while True:
+            buf = sock.recv(self.bufsize)
+            if self.is_EOF(buf):
+                sock.close()
+                break
+            data += buf
+        # message = data.decode()
+        return data
+
+
     def is_connected(self):
         return self.conn_state
 
     def disconnect(self):
-        # self.sock.close()
-        # self.data_sock.close()
         self.session.close()
+        self.sock.close()
+        if self.data_sock:
+            self.data_sock.close()
+
 
     def is_EOF(self, data_byte):
         return data_byte == b''

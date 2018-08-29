@@ -12,10 +12,10 @@ class FTPServer:
     def __init__(self, server_addr):
         self.epoll_fd = epoll()
         self.sock_list = {}
-        self.ctrl_handler = ControlHandler(self)
-        self.listen_sock, self.listen_fd = self.init_server(server_addr)
+        self.ctrl_handler = None
         self.is_runing = False
-
+        self.handlers = {}
+        self.listen_sock, self.listen_fd = self.init_server(server_addr)
 
     def init_server(self, server_addr):
         sock = socket(AF_INET, SOCK_STREAM)
@@ -26,19 +26,30 @@ class FTPServer:
         self.register(sock)
         return sock, fd
 
-    def create_data_sock(self, client_addr):
-        sock = create_connection(client_addr)
-        sock.setblocking(False)
+    def create_data_sock(self, client_addr, server_addr):
+        sock = socket(AF_INET, SOCK_STREAM)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
+        sock.bind(server_addr)
         fd = sock.fileno()
-        self.register(sock)
-        return sock, fd
+        try:
+            sock.connect(client_addr)
+            sock.setblocking(True)
+            # self.register(sock)
+            # ctrl_fd = self.ctrl_handler.fd
+            # todo
+            # self.handlers[fd] = self.handlers[ctrl_fd]
+            # self.handlers[fd] = ControlHandler(sock, sock.fileno(), self)
+        except ConnectionRefusedError:
+            sock.close()
+            sock = None
+            fd = None
+        return sock
 
 
     def register(self, socket):
         fd = socket.fileno()
         self.sock_list[fd] = socket
         self.epoll_fd.register(fd, EPOLLIN)
-        print(fd)
 
     def unregister(self, fd):
         self.epoll_fd.unregister(fd)
@@ -47,26 +58,32 @@ class FTPServer:
 
     def run(self):
         self.is_runing = True
-        while self.is_run():
-            epoll_list = self.epoll_fd.poll()
-            for fd, event in epoll_list:
-                if fd == self.listen_fd:
-                    self.handle_connection()
-                else:
-                    self.handle_control(fd)
+        try:
+            while self.is_run():
+                epoll_list = self.epoll_fd.poll()
+                for fd, event in epoll_list:
+                    if fd == self.listen_fd:
+                        self.handle_connection()
+                    else:
+                        self.handle_control(fd)
+        except ValueError:
+            pass
 
     def handle_connection(self):
         ctrl_sock, addr = self.listen_sock.accept()
         ctrl_sock.setblocking(False)
         self.register(ctrl_sock)
+        fd = ctrl_sock.fileno()
+        self.handlers[fd] = ControlHandler(ctrl_sock, self)
 
     def handle_control(self, fd):
-        self.init_handler(fd)
+        self.set_handler(fd)
         self.ctrl_handler.handle()
 
-    def init_handler(self, fd):
-        sock = self.sock_list[fd]
-        self.ctrl_handler.set_socket(sock, fd)
+    def set_handler(self, fd):
+        # sock = self.sock_list[fd]
+        # self.ctrl_handler.set_socket(sock, fd)
+        self.ctrl_handler = self.handlers[fd]
 
     def validate(self, path):
         # for test
@@ -103,12 +120,15 @@ class FTPServer:
         return False
 
     def disconnect(self):
-        fd = self.ctrl_handler.fd
+        fd = self.ctrl_handler.sock.fileno()
         sock = self.unregister(fd)
-        sock.close()
+        self.ctrl_handler.disconnect()
 
     def clear(self):
+        pass
         self.listen_sock.close()
+        # self.epoll_fd.close()
+        # while self.re
 
     def is_run(self):
         return self.is_runing

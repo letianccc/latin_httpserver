@@ -7,31 +7,32 @@ def log(*vargs, **kargs):
 
 
 
-def kill_pid():
-    port = '21'
-    command = ["netstat -tlnp |grep :%s" % port]
-    a = subprocess.run(command, shell=True, stdout=subprocess.PIPE)
+def kill_port():
+    ports = ['20', '21']
+    for port in ports:
+        command = ["netstat -tlnp |grep :%s" % port]
+        a = subprocess.run(command, shell=True, stdout=subprocess.PIPE)
 
-    # print(a.stdout.decode())
+        # print(a.stdout.decode())
 
-    result = a.stdout.decode()
-    rows = result.split('\n')
-    # print(result)
-    target = []
-    rows = rows[:-1]
-    for r in rows:
-        cols = r.split()
-        pid_col = cols[-1]
-        trailing = '/python3'
-        if pid_col.endswith(trailing):
-            pid = pid_col[:-len(trailing)]
-            target.append(pid)
-        else:
-            raise Exception
+        result = a.stdout.decode()
+        rows = result.split('\n')
+        # print(result)
+        target = []
+        rows = rows[:-1]
+        for r in rows:
+            cols = r.split()
+            pid_col = cols[-1]
+            trailing = '/python3'
+            if pid_col.endswith(trailing):
+                pid = pid_col[:-len(trailing)]
+                target.append(pid)
+            else:
+                raise Exception
 
-    for pid in target:
-        command = ['kill', '-9', pid]
-        subprocess.run(command, stdout=subprocess.PIPE)
+        for pid in target:
+            command = ['kill', '-9', pid]
+            subprocess.run(command, stdout=subprocess.PIPE)
 
 def kill_python_process():
     command = ["ps -C python3"]
@@ -53,4 +54,6 @@ def kill_python_process():
         subprocess.run(command, stdout=subprocess.PIPE)
 
 if __name__ == '__main__':
+    pass
+    kill_port()
     kill_python_process()

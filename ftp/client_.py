@@ -18,6 +18,7 @@ class Client:
     def init_connect(self, server_addr):
         addr = server_addr
         sock = create_connection(addr)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
         sock.setblocking(False)
         fd = sock.fileno()
         self.register(sock)
@@ -26,6 +27,21 @@ class Client:
     def send_request(self, message):
         data = message.encode()
         self.ctrl_sock.sendall(data)
+
+    def store(self, message):
+        data = message.encode()
+        self.data_sock.sendall(data)
+        self.data_sock.close()
+
+    def recv_data(self):
+        data = b''
+        while True:
+            buf = self.data_sock.recv(self.recv_bufsize)
+            if buf == b'':
+                return data.decode()
+            data += buf
+
+
 
     def register(self, socket):
         fd = socket.fileno()
@@ -55,6 +71,7 @@ class Client:
 
     def get_free_port(self):
         sock = socket(AF_INET, SOCK_STREAM)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
         sock.bind(('', 0))
         addr = sock.getsockname()[0]
         port = sock.getsockname()[1]
@@ -63,25 +80,54 @@ class Client:
 
     def make_data_connect(self, address):
         sock = socket(AF_INET, SOCK_STREAM)
+        self.listen_sock = sock
         sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
-        sock.setblocking(False)
+        sock.setblocking(True)
         sock.bind(address)
         sock.listen()
-        self.listen_sock = sock
         self.register(sock)
 
-    def get_response(self, request):
-        # self.before_request(request)
-        self.send_request(request)
-        response = self.recv_response()
-        self.after_request(request)
-        return response
+    def get_response(self, request=None):
+        if request:
+            # self.before_request(request)
+            self.send_request(request)
+            while True:
+                epoll_list = self.epoll_fd.poll()
+                if self.is_listen_event(epoll_list):
+                    self.data_sock, fd = self.listen_sock.accept()
+                else:
+                    response = self.recv_response()
+                    return response
+        else:
+            epoll_list = self.epoll_fd.poll()
+            response = self.recv_response()
+            return response
+
+
+
+    def is_listen_event(self, epoll_list):
+        if self.listen_sock:
+            fds = [fd for fd, event in epoll_list]
+            fd = self.listen_sock.fileno()
+            if fd in fds:
+                return True
+        return False
+
+
+
+            # for fd, event in epoll_list:
+            #     if self.listen_sock and fd == self.listen_sock.fileno():
+            #         self.data_sock, data_fd = self.listen_sock.accept()
+            #         print('data_sock', self.data_sock)
+            #     else:
+            #         response = self.recv_response()
+            #         return response
 
     def before_request(self, request):
         pass
 
     def after_request(self, request):
-        if 'PORT' in request:
+        if 'PORT' in request or 'STOR' in request:
             if self.listen_sock:
                 try:
                     self.data_sock, db = self.listen_sock.accept()
@@ -97,3 +143,4 @@ class Client:
             self.listen_sock.close()
         if self.data_sock:
             self.data_sock.close()
+        # self.epoll_fd.close()

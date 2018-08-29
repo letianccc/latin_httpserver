@@ -141,13 +141,29 @@ class TestServer(unittest.TestCase):
         self.assertEqual('226 Closing data connection.Requested file action successful', resp)
 
     def test_BLOCK(self):
-        pass
+
 
     def test_login(self):
         pathname = 'p'
         request = 'STOR %s\r\n' % pathname
         resp = self.send_request(request)
         self.assertEqual(resp, '530 Not logged in')
+        self.login()
+        addr = self.client.ctrl_sock.getsockname()
+        self.client.make_data_connect(addr)
+        pathname = 'p'
+        request = 'STOR %s\r\n' % pathname
+        resp = self.send_request(request)
+        self.assertIsNotNone(self.client.data_sock)
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        with open('test') as f:
+            target_data = f.read()
+            self.client.store(target_data)
+        resp = self.client.get_response()
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        server_path = 'server_fs/%s' % pathname
+        with open(server_path) as f:
+            self.assertEqual(target_data, f.read())
 
 
     def login(self):

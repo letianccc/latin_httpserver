@@ -6,5 +6,7 @@ from socket import *
 sock = socket(AF_INET, SOCK_STREAM)
 sock.bind(('', 21))
 sock.listen()
-print(sock.fileno())
-print(sock.fileno())
+
+sock = socket(AF_INET, SOCK_STREAM)
+sock.connect(('', 21))
+sock.listen()
