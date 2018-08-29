@@ -1,8 +1,9 @@
+
 import unittest
 from httpserver.client_ import Client
 from httpserver.server_ import HttpServer
 import threading
-
+from httpserver.config import *
 
 class ServerThread(threading.Thread):
     def __init__(self, server_addr):
@@ -28,8 +29,8 @@ def run_server(server_addr):
 class TestServer(unittest.TestCase):
 
     def setUp(self):
-        server_addr = ('127.0.0.1', 8888)
-        self.thread = run_server(server_addr)
+        self.server_addr = (SERVER_ADDR, SERVER_PORT)
+        self.thread = run_server(self.server_addr)
         while not self.thread.server:
             pass
 
@@ -62,12 +63,12 @@ class TestServer(unittest.TestCase):
         assert 'HTTP/1.0 500 Server Error' in response
 
     def send_request(self, url):
-        server_addr = ('127.0.0.1', 8888)
+        # server_addr = ('127.0.0.1', 8888)
         method = 'GET'
         version = 'HTTP/1.1'
         request_line = ' '.join([method, url, version]) + '\r\n'
         message = request_line  + '\r\n'
-        c = Client(server_addr)
+        c = Client(self.server_addr)
         response = c.get_response(message)
         return response
 

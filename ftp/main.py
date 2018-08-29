@@ -1,9 +1,11 @@
 
-from ftp.server_ import HttpServer
+from ftp.server_ import FTPServer
+from config import *
 
 
 def main():
-    server = HttpServer()
+    server_addr = (SERVER_ADDR, SERVER_PORT)
+    server = FTPServer(server_addr)
     server.run()
 
 if __name__ == '__main__':

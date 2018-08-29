@@ -20,7 +20,7 @@ class HttpServer:
 
     def init_server(self, server_addr):
         sock = socket(AF_INET, SOCK_STREAM)
-        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
         fd = sock.fileno()
         sock.bind(server_addr)
         sock.listen()
@@ -117,7 +117,8 @@ class HttpServer:
             raise Forbidden
 
     def can_disconnect(self):
-        return self.client.is_connected()
+        return True
+        # return self.client.is_connected()
 
     def init_client(self, fd):
         sock = self.sock_list[fd]
