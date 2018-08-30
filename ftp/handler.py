@@ -20,6 +20,7 @@ class ControlHandler:
         self.init()
         self.server = server
         self.data_sock = None
+        self.mode = 'S'
 
     def init(self):
         self.init_db()
@@ -35,11 +36,13 @@ class ControlHandler:
             'PORT': self.handle_PORT,
             'STOR': self.handle_STOR,
             'RETR': self.handle_RETR,
+            'MODE': self.handle_MODE,
         }
 
     def handle(self):
         req = self.recv_message()
         if req == '':
+            pass
             self.server.disconnect()
         else:
             resp = self.make_response(req)
@@ -104,6 +107,21 @@ class ControlHandler:
                 resp = '501 Syntax error in parameters or arguments'
         return resp
 
+    def handle_MODE(self, mode):
+        if not self.is_login():
+            resp = '530 Not logged in'
+        else:
+            resp = '200 Command okay'
+            if mode == 'B-Block':
+                self.mode = 'B'
+            elif mode == 'S-Stream':
+                self.mode = 'S'
+            elif mode == 'C-Compressed':
+                self.mode = 'C'
+            else:
+                resp = '501 Syntax error in parameters or arguments'
+        return resp
+
     def handle_STOR(self, pathname):
         if not self.is_login():
             resp = '530 Not logged in'
@@ -115,18 +133,17 @@ class ControlHandler:
                 resp = '125 Data connection already open; transfer starting'
                 self.send_message(resp)
 
-                data = self.recv_data_block(self.data_sock)
+                data = self.recv_data(self.data_sock)
                 if data == b'':
                     resp = '426 Connection closed; transfer aborted'
-                    return resp
-                path = '%s/%s' %(cur_dir, pathname)
-                try:
-                    with open(path, 'wb') as f:
-                        f.write(data)
-                    resp = '226 Closing data connection.Requested file action successful'
-                except IOError:
-                    resp = '451 Requested action aborted: local error in processing'
-
+                else:
+                    path = '%s/%s' %(cur_dir, pathname)
+                    try:
+                        with open(path, 'wb') as f:
+                            f.write(data)
+                        resp = '226 Closing data connection.Requested file action successful'
+                    except IOError:
+                        resp = '451 Requested action aborted: local error in processing'
         return resp
 
     def handle_RETR(self, pathname):
@@ -141,11 +158,11 @@ class ControlHandler:
                 self.send_message(resp)
 
                 path = '%s/%s' %(cur_dir, pathname)
+
                 try:
                     with open(path, 'rb') as f:
                         data = f.read()
-                        self.data_sock.sendall(data)
-                        self.data_sock.close()
+                        self.send_data(data)
                     resp = '226 Closing data connection.Requested file action successful'
                 except IOError:
                     resp = '451 Requested action aborted: local error in processing'
@@ -173,6 +190,37 @@ class ControlHandler:
         data = message.encode()
         self.sock.sendall(data)
 
+    def send_data(self, data):
+        if self.mode == 'S':
+            self.data_sock.sendall(data)
+            self.data_sock.close()
+        elif self.mode == 'B':
+            self.store_in_block(data)
+
+    def store_in_block(self, data):
+        payload_capacity = 65536
+        rest = data
+        while rest:
+            data = rest[:payload_capacity]
+            rest = rest[payload_capacity:]
+            block = self.format_block(data, rest)
+            self.data_sock.sendall(block)
+
+    def format_block(self, payload, rest):
+        eof_code = 64
+        normal_code = 0
+        eof_byte = (eof_code).to_bytes(1, 'big')
+        normal_byte = (normal_code).to_bytes(1, 'big')
+        is_eof = rest == b''
+        size = len(payload)
+        count_field = (size).to_bytes(2, 'big')
+        if is_eof:
+            desc_field = eof_byte
+        else:
+            desc_field = normal_byte
+        block = desc_field + count_field + payload
+        return block
+
     def recv_message(self, sock=None):
         if sock is None:
             sock = self.sock
@@ -189,16 +237,35 @@ class ControlHandler:
         message = data.decode()
         return message
 
-    def recv_data_block(self, sock):
+    def recv_data(self, sock):
+        data = b''
+        if self.mode == 'S':
+            return self.recv_stream(sock)
+        elif self.mode == 'B':
+            return self.recv_block(sock)
+
+    def recv_stream(self, sock):
         data = b''
         while True:
             buf = sock.recv(self.bufsize)
+            data += buf
             if self.is_EOF(buf):
                 sock.close()
-                break
-            data += buf
-        # message = data.decode()
-        return data
+                return data
+
+    def recv_block(self, sock):
+        data = b''
+        while True:
+            header = sock.recv(3)
+            desc = int.from_bytes(header[0:1], byteorder='big')
+            count = int.from_bytes(header[1:3], byteorder='big')
+            payload = sock.recv(count)
+            disconnect = len(header) != 3 or len(payload) != count
+            if disconnect:
+                return ''
+            data += payload
+            if self.is_block_eof(desc):
+                return data
 
 
     def is_connected(self):
@@ -209,6 +276,9 @@ class ControlHandler:
         self.sock.close()
         if self.data_sock:
             self.data_sock.close()
+
+    def is_block_eof(self, desc):
+        return desc & 64 > 0
 
 
     def is_EOF(self, data_byte):

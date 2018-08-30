@@ -5,6 +5,7 @@ from util import log
 import re
 from .entity.exception import CommandError
 from .handler import ControlHandler
+from time import sleep
 
 bufsize = 65536
 
@@ -120,19 +121,22 @@ class FTPServer:
         return False
 
     def disconnect(self):
+        # unregister 放在最后 因为test线程检测sock_list决定是否退出
         fd = self.ctrl_handler.sock.fileno()
-        sock = self.unregister(fd)
         self.ctrl_handler.disconnect()
+        self.handlers.pop(fd)
+        sock = self.unregister(fd)
 
     def clear(self):
-        pass
+        fd = self.listen_sock.fileno()
+        self.unregister(fd)
         self.listen_sock.close()
-        # self.epoll_fd.close()
-        # while self.re
 
     def is_run(self):
         return self.is_runing
 
     def stop(self):
         self.clear()
-        self.is_runing = False
+        while self.sock_list:
+            sleep(0.01)
+        self.epoll_fd.close()

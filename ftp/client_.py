@@ -4,6 +4,7 @@ from time import sleep
 from errno import *
 from util import log
 from select import epoll, EPOLLIN
+import re
 
 class Client:
     def __init__(self, server_addr):
@@ -14,6 +15,7 @@ class Client:
         self.epoll_fd = epoll()
         self.sock_list = {}
         self.ctrl_sock = self.init_connect(server_addr)
+        self.mode = 'S'
 
     def init_connect(self, server_addr):
         addr = server_addr
@@ -24,24 +26,90 @@ class Client:
         self.register(sock)
         return sock
 
-    def send_request(self, message):
+    def send_message(self, message):
         data = message.encode()
         self.ctrl_sock.sendall(data)
 
-    def store(self, message):
-        data = message.encode()
-        self.data_sock.sendall(data)
-        self.data_sock.close()
+    def send_data(self, data):
+        if self.mode == 'S':
+            self.data_sock.sendall(data)
+            self.data_sock.close()
+        elif self.mode == 'B':
+            self.store_in_block(data)
+
+    def store_in_block(self, data):
+        payload_capacity = 65536
+        rest = data
+        while rest:
+            data = rest[:payload_capacity]
+            rest = rest[payload_capacity:]
+            block = self.format_block(data, rest)
+            self.data_sock.sendall(block)
+
+    def format_block(self, payload, rest):
+        eof_code = 64
+        normal_code = 0
+        eof_byte = (eof_code).to_bytes(1, 'big')
+        normal_byte = (normal_code).to_bytes(1, 'big')
+        is_eof = rest == b''
+        size = len(payload)
+        count_field = (size).to_bytes(2, 'big')
+        if is_eof:
+            desc_field = eof_byte
+        else:
+            desc_field = normal_byte
+        block = desc_field + count_field + payload
+        return block
+
+
+    def format_blocks(self, bytestream):
+        blocks = b''
+        block_capacity = 65536
+        eof_code = 64
+        eof_byte = (eof_code).to_bytes(1, 'big')
+        normal_byte = (0).to_bytes(1, 'big')
+        is_eof = False
+        while not is_eof:
+            payload = bytestream[:65536]
+            bytestream = bytestream[65536:]
+            size = len(payload)
+            count_field = (size).to_bytes(2, 'big')
+            if size < block_capacity or bytestream == '':
+                is_eof = True
+                desc_field = eof_byte
+            else:
+                desc_field = normal_byte
+            block = desc_field + count_field + payload
+            blocks += block
+        return blocks
+
 
     def recv_data(self):
         data = b''
         while True:
             buf = self.data_sock.recv(self.recv_bufsize)
-            if buf == b'':
-                return data.decode()
+            if self.is_EOF(buf):
+                self.data_sock.close()
+                return data
             data += buf
 
+    def recv_block(self):
+        sock = self.data_sock
+        data = b''
+        while True:
+            header = sock.recv(3)
+            desc = int.from_bytes(header[0:1], byteorder='big')
+            count = int.from_bytes(header[1:3], byteorder='big')
+            payload = sock.recv(count)
+            data += payload
+            if self.is_block_eof(desc):
+                if len(payload) == count:
+                    return data
+                else:
+                    return ''
 
+    def is_block_eof(self, desc):
+        return desc & 64 > 0
 
     def register(self, socket):
         fd = socket.fileno()
@@ -87,41 +155,33 @@ class Client:
         sock.listen()
         self.register(sock)
 
-    def get_response(self, request=None):
-        if request:
-            # self.before_request(request)
-            self.send_request(request)
-            while True:
-                epoll_list = self.epoll_fd.poll()
-                if self.is_listen_event(epoll_list):
+    def send_request(self, request):
+        self.send_message(request)
+        resp = self.get_response()
+        self.handle_response(request, resp)
+        return resp
+
+    def get_response(self):
+        response = None
+        while True:
+            epoll_list = self.epoll_fd.poll()
+            for fd, event in epoll_list:
+                if self.listen_sock and fd == self.listen_sock.fileno():
                     self.data_sock, fd = self.listen_sock.accept()
                 else:
                     response = self.recv_response()
-                    return response
-        else:
-            epoll_list = self.epoll_fd.poll()
-            response = self.recv_response()
-            return response
+            if response:
+                return response
 
 
-
-    def is_listen_event(self, epoll_list):
-        if self.listen_sock:
-            fds = [fd for fd, event in epoll_list]
-            fd = self.listen_sock.fileno()
-            if fd in fds:
-                return True
-        return False
+    def handle_response(self, request, response):
+        if 'MODE' in request:
+            if response == '200 Command okay':
+                pattern = 'MODE (?P<mode>\S+)\r\n'
+                rs = re.match(pattern, request)
+                self.mode = rs.group('mode')[0]
 
 
-
-            # for fd, event in epoll_list:
-            #     if self.listen_sock and fd == self.listen_sock.fileno():
-            #         self.data_sock, data_fd = self.listen_sock.accept()
-            #         print('data_sock', self.data_sock)
-            #     else:
-            #         response = self.recv_response()
-            #         return response
 
     def before_request(self, request):
         pass
