@@ -28,6 +28,8 @@ class FTPServer:
         return sock, fd
 
     def create_data_sock(self, client_addr, server_addr):
+        # if self.ctrl_handler.data_sock:
+        #     self.ctrl_handler.data_sock.close()
         sock = socket(AF_INET, SOCK_STREAM)
         sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
         sock.bind(server_addr)
@@ -73,9 +75,13 @@ class FTPServer:
     def handle_connection(self):
         ctrl_sock, addr = self.listen_sock.accept()
         ctrl_sock.setblocking(False)
-        self.register(ctrl_sock)
-        fd = ctrl_sock.fileno()
-        self.handlers[fd] = ControlHandler(ctrl_sock, self)
+        self.register_handler(ctrl_sock)
+
+    def register_handler(self, sock):
+        self.register(sock)
+        fd = sock.fileno()
+        self.handlers[fd] = ControlHandler(sock, self)
+
 
     def handle_control(self, fd):
         self.set_handler(fd)
@@ -136,7 +142,7 @@ class FTPServer:
         return self.is_runing
 
     def stop(self):
-        self.clear()
-        while self.sock_list:
+        while len(self.sock_list) > 1:
             sleep(0.01)
+        self.clear()
         self.epoll_fd.close()

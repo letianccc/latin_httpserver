@@ -9,9 +9,6 @@ class ServerThread(threading.Thread):
         self.server_addr = server_addr
         self.server = None
 
-    def stop(self):
-        self.server.stop()
-
     def run(self):
         self.server = FTPServer(self.server_addr)
         self.server.run()

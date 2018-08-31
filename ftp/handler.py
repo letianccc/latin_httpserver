@@ -2,6 +2,8 @@ import re
 from .entity.user import User, session
 from util import log
 import socket
+import tempfile
+import os.path
 
 bufsize = 65536
 
@@ -9,7 +11,7 @@ users = [
     {'user': 'latin',
     'password':'123'}
 ]
-cur_dir = './server_fs'
+cur_dir = 'server_fs'
 
 class ControlHandler:
     def __init__(self, socket, server):
@@ -37,12 +39,13 @@ class ControlHandler:
             'STOR': self.handle_STOR,
             'RETR': self.handle_RETR,
             'MODE': self.handle_MODE,
+            'REIN': self.handle_REIN,
+            'STOU': self.handle_STOU,
         }
 
     def handle(self):
         req = self.recv_message()
         if req == '':
-            pass
             self.server.disconnect()
         else:
             resp = self.make_response(req)
@@ -50,13 +53,15 @@ class ControlHandler:
 
     def make_response(self, request):
         self.request = request
-        pattern = '(?P<cmd>\w+) (?P<arg>\S+)\r\n'
+        pattern = '(?P<cmd>\w+)( (?P<arg>\S+))?\r\n'
         rs = re.match(pattern, request)
         if rs is None:
             resp = '500 Syntax error, command unrecognized'
             return resp
-        cmd = rs.group('cmd')
-        arg = rs.group('arg')
+
+        rs = rs.groupdict()
+        cmd = rs.get('cmd')
+        arg = rs.get('arg')
         cmd = cmd.upper()
 
         handler = self.cmd_to_handler.get(cmd, None)
@@ -97,6 +102,8 @@ class ControlHandler:
         if not self.is_login():
             resp = '530 Not logged in'
         else:
+            if self.data_sock:
+                self.disconnect_data()
             server_addr = self.sock.getsockname()[0], 20
             client_addr = addr
             data_sock = self.server.create_data_sock(client_addr, server_addr)
@@ -141,7 +148,43 @@ class ControlHandler:
                     try:
                         with open(path, 'wb') as f:
                             f.write(data)
-                        resp = '226 Closing data connection.Requested file action successful'
+                        if self.mode == 'S':
+                            resp = '226 Closing data connection.Requested file action successful'
+                        elif self.mode == 'B':
+                            resp = '250 Requested file action okay, completed'
+                    except IOError:
+                        resp = '451 Requested action aborted: local error in processing'
+        return resp
+
+    def handle_STOU(self, filename):
+        if not self.is_login():
+            resp = '530 Not logged in'
+        else:
+            self.make_data_connect()
+            if not self.enable_data_connect():
+                resp = '425 Can\'t open data connection'
+            else:
+                resp = '125 Data connection already open; transfer starting'
+                self.send_message(resp)
+
+                data = self.recv_data(self.data_sock)
+                if data == b'':
+                    resp = '426 Connection closed; transfer aborted'
+                else:
+                    if not self.is_usable(filename):
+                        tf = tempfile.NamedTemporaryFile()
+                        filename = tf.name[len('/temp/'):]
+                        tf.close()
+                    path = '%s/%s' % (cur_dir, filename)
+
+                    try:
+                        with open(path, 'wb') as f:
+                            f.write(data)
+                        if self.mode == 'S':
+                            resp = '226 Closing data connection.Requested file action successful'
+                        elif self.mode == 'B':
+                            resp = '250 Requested file action okay, completed'
+                        resp = '%s\r\n%s' % (resp, filename)
                     except IOError:
                         resp = '451 Requested action aborted: local error in processing'
         return resp
@@ -163,10 +206,24 @@ class ControlHandler:
                     with open(path, 'rb') as f:
                         data = f.read()
                         self.send_data(data)
-                    resp = '226 Closing data connection.Requested file action successful'
+                    if self.mode == 'S':
+                        resp = '226 Closing data connection.Requested file action successful'
+                    elif self.mode == 'B':
+                        resp = '250 Requested file action okay, completed'
                 except IOError:
                     resp = '451 Requested action aborted: local error in processing'
         return resp
+
+    def handle_REIN(self, arg):
+        self.reinit()
+        resp = '220 Service ready for new user'
+        return resp
+
+    def is_usable(self, filename):
+        if not filename:
+            return False
+        path = '%s/%s' % (cur_dir, filename)
+        return not os.path.isfile(path)
 
 
     def make_data_connect(self):
@@ -276,6 +333,19 @@ class ControlHandler:
         self.sock.close()
         if self.data_sock:
             self.data_sock.close()
+
+    def disconnect_data(self):
+        self.data_sock.close()
+        self.data_sock = None
+
+    def reinit(self):
+        if self.data_sock:
+            self.data_sock.close()
+        self.user_wait = {}
+        self.login_users = {}
+        self.data_sock = None
+        self.mode = 'S'
+
 
     def is_block_eof(self, desc):
         return desc & 64 > 0

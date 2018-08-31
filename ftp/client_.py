@@ -83,6 +83,16 @@ class Client:
             blocks += block
         return blocks
 
+    def reinit(self):
+        if self.data_sock:
+            self.data_sock.close()
+            self.data_sock = None
+        if self.listen_sock:
+            self.unregister(self.listen_sock.fileno())
+            self.listen_sock.close()
+            self.listen_sock = None
+        self.mode = 'S'
+
 
     def recv_data(self):
         data = b''
@@ -147,6 +157,8 @@ class Client:
         return addr, port
 
     def make_data_connect(self, address):
+        if self.listen_sock:
+            self.stop_listen()
         sock = socket(AF_INET, SOCK_STREAM)
         self.listen_sock = sock
         sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
@@ -154,6 +166,11 @@ class Client:
         sock.bind(address)
         sock.listen()
         self.register(sock)
+
+    def stop_listen(self):
+        self.unregister(self.listen_sock.fileno())
+        self.listen_sock.close()
+        self.listen_sock = None
 
     def send_request(self, request):
         self.send_message(request)
@@ -167,7 +184,9 @@ class Client:
             epoll_list = self.epoll_fd.poll()
             for fd, event in epoll_list:
                 if self.listen_sock and fd == self.listen_sock.fileno():
-                    self.data_sock, fd = self.listen_sock.accept()
+                    if self.data_sock:
+                        self.data_sock.close()
+                    self.data_sock, addr = self.listen_sock.accept()
                 else:
                     response = self.recv_response()
             if response:
@@ -180,20 +199,36 @@ class Client:
                 pattern = 'MODE (?P<mode>\S+)\r\n'
                 rs = re.match(pattern, request)
                 self.mode = rs.group('mode')[0]
+        elif 'REIN' in request:
+            if response == '220 Service ready for new user':
+                self.reinit()
+        # elif 'PORT' in request:
+        #     if response == '200 Command okay':
+        #         self.data_sock.close()
+
+    def reinit(self):
+        if self.data_sock:
+            self.data_sock.close()
+            self.data_sock = None
+        if self.listen_sock:
+            self.unregister(self.listen_sock.fileno())
+            self.listen_sock.close()
+            self.listen_sock = None
+        self.mode = 'S'
 
 
 
     def before_request(self, request):
         pass
 
-    def after_request(self, request):
-        if 'PORT' in request or 'STOR' in request:
-            if self.listen_sock:
-                try:
-                    self.data_sock, db = self.listen_sock.accept()
-                except BlockingIOError:
-                    pass
-
+    # def after_request(self, request):
+    #     if 'PORT' in request or 'STOR' in request:
+    #         if self.listen_sock:
+    #             try:
+    #                 self.data_sock, addr = self.listen_sock.accept()
+    #             except BlockingIOError:
+    #                 pass
+    #
     def is_EOF(self, data_byte):
         return data_byte == b''
 

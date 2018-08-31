@@ -16,12 +16,15 @@ class TestServer(unittest.TestCase):
         # kill_python_process()
         self.server_addr = (SERVER_ADDR, SERVER_PORT)
         self.thread = self.run_server(self.server_addr)
+        self.server = self.thread.server
         self.client = Client(self.server_addr)
+        addr = self.client.ctrl_sock.getsockname()
+        self.client.make_data_connect(addr)
 
     def tearDown(self):
-        self.client.clear()
         self.clear_file()
-        self.thread.stop()
+        self.client.clear()
+        self.server.stop()
         # self.thread.join()
         # kill_python_process()
 
@@ -40,6 +43,14 @@ class TestServer(unittest.TestCase):
         request = 'STOR %s\r\n' % pathname
         resp = self.client.send_request(request)
         self.assertEqual(resp, '530 Not logged in')
+
+        self.tearDown()
+        self.setUp()
+
+        addr = self.client.get_free_port()
+        request = 'PORT %s,%s\r\n' % addr
+        resp = self.client.send_request(request)
+        assert resp == '530 Not logged in'
 
     def test_USER(self):
         wrong_user = 'wrong_user'
@@ -73,13 +84,12 @@ class TestServer(unittest.TestCase):
         assert resp == '200 Command okay'
         assert self.client.data_sock.fileno() != -1
 
-        self.tearDown()
-        self.setUp()
-
         addr = self.client.get_free_port()
+        self.client.make_data_connect(addr)
         request = 'PORT %s,%s\r\n' % addr
         resp = self.client.send_request(request)
-        assert resp == '530 Not logged in'
+        assert resp == '200 Command okay'
+        assert self.client.data_sock.fileno() != -1
 
         self.tearDown()
         self.setUp()
@@ -92,29 +102,39 @@ class TestServer(unittest.TestCase):
 
     def test_MODE(self):
         self.login()
+        handler = list(self.server.handlers.values())[0]
+        self.assertEqual(handler.mode, 'S')
+        self.assertEqual(self.client.mode, 'S')
         request = 'MODE %s-%s\r\n' % ('B', 'Block')
         resp = self.client.send_request(request)
         self.assertEqual('200 Command okay', resp)
+        handler = list(self.server.handlers.values())[0]
+        self.assertEqual(handler.mode, 'B')
         self.assertEqual(self.client.mode, 'B')
 
         self.tearDown()
         self.setUp()
 
         self.login()
+        handler = list(self.server.handlers.values())[0]
+        self.assertEqual(handler.mode, 'S')
+        self.assertEqual(self.client.mode, 'S')
         request = 'MODE ABCDEF\r\n'
         resp = self.client.send_request(request)
         self.assertEqual('501 Syntax error in parameters or arguments', resp)
+        handler = list(self.server.handlers.values())[0]
+        self.assertEqual(handler.mode, 'S')
         self.assertEqual(self.client.mode, 'S')
 
     def test_STOR(self):
         self.login()
-        addr = self.client.ctrl_sock.getsockname()
-        self.client.make_data_connect(addr)
+
+
         pathname = 'p'
         request = 'STOR %s\r\n' % pathname
         resp = self.client.send_request(request)
-        self.assertIsNotNone(self.client.data_sock)
         self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
         with open('client_fs/index', 'rb') as f:
             self.client.send_data(f.read())
         resp = self.client.get_response()
@@ -130,7 +150,8 @@ class TestServer(unittest.TestCase):
 
         # 数据连接失败
         self.login()
-        addr = self.client.ctrl_sock.getsockname()
+
+        self.client.stop_listen()
         pathname = 'p'
         request = 'STOR %s\r\n' % pathname
         resp = self.client.send_request(request)
@@ -141,8 +162,8 @@ class TestServer(unittest.TestCase):
         self.setUp()
 
         self.login()
-        addr = self.client.ctrl_sock.getsockname()
-        self.client.make_data_connect(addr)
+
+
         pathname = 'p'
         request = 'STOR %s\r\n' % pathname
         resp = self.client.send_request(request)
@@ -150,18 +171,83 @@ class TestServer(unittest.TestCase):
         resp = self.client.get_response()
         self.assertEqual('426 Connection closed; transfer aborted', resp)
 
+    def test_STOU(self):
+        self.login()
+
+
+        request = 'STOU\r\n'
+        resp = self.client.send_request(request)
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            self.client.send_data(f.read())
+        resp = self.client.get_response()
+        parts = resp.split('\r\n')
+        resp = parts[0]
+        path = parts[1]
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        server_path = 'server_fs/%s' % path
+        with open('client_fs/index') as source:
+            with open(server_path) as target:
+                self.assertEqual(source.read(), target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
+
+        self.tearDown()
+        self.setUp()
+
+        self.login()
+
+
+        pathname = 'p'
+        request = 'STOU %s\r\n' % pathname
+        resp = self.client.send_request(request)
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            self.client.send_data(f.read())
+        resp = self.client.get_response()
+        parts = resp.split('\r\n')
+        resp = parts[0]
+        path = parts[1]
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        self.assertEqual(path, 'p')
+        server_path = 'server_fs/%s' % path
+        with open('client_fs/index') as source:
+            with open(server_path) as target:
+                self.assertEqual(source.read(), target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
+
+        pathname = 'p'
+        request = 'STOU %s\r\n' % pathname
+        resp = self.client.send_request(request)
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            self.client.send_data(f.read())
+        resp = self.client.get_response()
+        parts = resp.split('\r\n')
+        resp = parts[0]
+        path = parts[1]
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        self.assertNotEqual(path, 'p')
+        server_path = 'server_fs/%s' % path
+        with open('client_fs/index') as source:
+            with open(server_path) as target:
+                self.assertEqual(source.read(), target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
+
     def test_RETR(self):
         with open('client_fs/index', 'rb') as source:
             with open('server_fs/p', 'wb') as target:
                 target.write(source.read())
         self.login()
-        addr = self.client.ctrl_sock.getsockname()
-        self.client.make_data_connect(addr)
+
+
         pathname = 'p'
         request = 'RETR %s\r\n' % pathname
         resp = self.client.send_request(request)
-        self.assertIsNotNone(self.client.data_sock)
         self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
         data = self.client.recv_data()
         with open('server_fs/p', 'rb') as f:
             self.assertEqual(data, f.read())
@@ -173,18 +259,18 @@ class TestServer(unittest.TestCase):
         self.login()
         request = 'MODE %s-%s\r\n' % ('B', 'Block')
         self.client.send_request(request)
-        addr = self.client.ctrl_sock.getsockname()
-        self.client.make_data_connect(addr)
+
+
         pathname = 'p'
         request = 'STOR %s\r\n' % pathname
         resp = self.client.send_request(request)
-        self.assertIsNotNone(self.client.data_sock)
         self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
         with open('client_fs/index', 'rb') as f:
             target_data = f.read()
             self.client.store_in_block(target_data)
         resp = self.client.get_response()
-        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        # self.assertEqual('250 Requested file action okay, completed', resp)
         server_path = 'server_fs/%s' % pathname
         with open(server_path, 'rb') as f:
             self.assertEqual(target_data, f.read())
@@ -197,20 +283,48 @@ class TestServer(unittest.TestCase):
         self.login()
         request = 'MODE %s-%s\r\n' % ('B', 'Block')
         self.client.send_request(request)
-        addr = self.client.ctrl_sock.getsockname()
-        self.client.make_data_connect(addr)
+
+
         pathname = 'p'
         request = 'RETR %s\r\n' % pathname
         resp = self.client.send_request(request)
-        self.assertIsNotNone(self.client.data_sock)
         self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
         data = self.client.recv_block()
         with open('server_fs/p', 'rb') as f1:
                 self.assertEqual(f1.read(), data)
         resp = self.client.get_response()
-        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        # self.assertEqual('250 Requested file action okay, completed', resp)
         self.assertNotEqual(-1, self.client.data_sock.fileno())
 
+    def test_REIN(self):
+        self.login()
+        request = 'MODE %s-%s\r\n' % ('B', 'Block')
+        self.client.send_request(request)
+
+        addr = self.client.get_free_port()
+
+        request = 'PORT %s,%s\r\n' % addr
+        self.client.send_request(request)
+
+        request = 'REIN\r\n'
+        resp = self.client.send_request(request)
+        self.assertEqual('220 Service ready for new user', resp)
+        self.assertIsNone(self.client.data_sock)
+        handler = list(self.server.handlers.values())[0]
+        self.assertIsNotNone(handler.sock)
+        self.assertEqual(handler.sock.getsockname(), self.client.ctrl_sock.getpeername())
+        self.assertEqual(handler.sock.getpeername(), self.client.ctrl_sock.getsockname())
+        self.assertDictEqual(handler.login_users, {})
+        self.assertIsNone(handler.data_sock)
+        self.assertIsNone(self.client.data_sock)
+        self.assertEqual(handler.mode, 'S')
+        self.assertEqual(self.client.mode, 'S')
+
+        addr = self.client.get_free_port()
+        request = 'PORT %s,%s\r\n' % addr
+        resp = self.client.send_request(request)
+        assert resp == '530 Not logged in'
 
 
 
@@ -231,11 +345,17 @@ class TestServer(unittest.TestCase):
         return thread
 
     def clear_file(self):
-        path = 'server_fs/p'
-        if os.path.exists(path):
+        dir = 'server_fs'
+        names = os.listdir(dir)
+        names.remove('index')
+        paths = [dir+'/'+name for name in names]
+        for path in paths:
             os.remove(path)
-        path = 'client_fs/p'
-        if os.path.exists(path):
+        dir = 'client_fs'
+        names = os.listdir(dir)
+        names.remove('index')
+        paths = [dir+'/'+name for name in names]
+        for path in paths:
             os.remove(path)
 
 

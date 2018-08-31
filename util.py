@@ -53,6 +53,10 @@ def kill_python_process():
         command = ['kill', '-9', pid]
         subprocess.run(command, stdout=subprocess.PIPE)
 
+def chmod():
+    command = ["chmod a+wrx * -R"]
+    a = subprocess.run(command, shell=True, stdout=subprocess.PIPE)
+
 if __name__ == '__main__':
     pass
     kill_port()
