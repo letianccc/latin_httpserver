@@ -12,8 +12,8 @@ pswd = '123'
 class TestServer(unittest.TestCase):
 
     def setUp(self):
-        # kill_port()
-        # kill_python_process()
+        kill_port()
+        kill_python_process()
         self.server_addr = (SERVER_ADDR, SERVER_PORT)
         self.thread = self.run_server(self.server_addr)
         self.server = self.thread.server
@@ -234,6 +234,45 @@ class TestServer(unittest.TestCase):
         with open('client_fs/index') as source:
             with open(server_path) as target:
                 self.assertEqual(source.read(), target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
+
+    def test_APPE(self):
+        self.login()
+        pathname = 'p'
+        request = 'APPE %s\r\n' % pathname
+        resp = self.client.send_request(request)
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            data = f.read()
+            quarter = len(data) // 4
+            self.client.send_data(data[:quarter])
+        resp = self.client.get_response()
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        server_path = 'server_fs/%s' % pathname
+        with open('client_fs/index', 'rb') as source:
+            with open(server_path, 'rb') as target:
+                data = source.read()
+                quarter = len(data) // 4
+                self.assertEqual(data[:quarter], target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
+
+        request = 'APPE %s\r\n' % pathname
+        resp = self.client.send_request(request)
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            data = f.read()
+            quarter = len(data) // 4
+            self.client.send_data(data[:quarter])
+        resp = self.client.get_response()
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        server_path = 'server_fs/%s' % pathname
+        with open('client_fs/index', 'rb') as source:
+            with open(server_path, 'rb') as target:
+                data = source.read()
+                quarter = len(data) // 4
+                self.assertEqual(data[:quarter]*2, target.read())
         self.assertEqual(-1, self.client.data_sock.fileno())
 
     def test_RETR(self):

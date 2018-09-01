@@ -29,40 +29,44 @@ class TestServer(unittest.TestCase):
         # kill_python_process()
 
 
-    def test_PORT(self):
+    def test_APPE(self):
         self.login()
-        addr = self.client.get_free_port()
-        self.client.make_data_connect(addr)
-        request = 'PORT %s,%s\r\n' % addr
+        pathname = 'p'
+        request = 'APPE %s\r\n' % pathname
         resp = self.client.send_request(request)
-        assert resp == '200 Command okay'
-        assert self.client.data_sock.fileno() != -1
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            data = f.read()
+            quarter = len(data) // 4
+            self.client.send_data(data[:quarter])
+        resp = self.client.get_response()
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        server_path = 'server_fs/%s' % pathname
+        with open('client_fs/index', 'rb') as source:
+            with open(server_path, 'rb') as target:
+                data = source.read()
+                quarter = len(data) // 4
+                self.assertEqual(data[:quarter], target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
 
-        addr = self.client.get_free_port()
-        self.client.make_data_connect(addr)
-        request = 'PORT %s,%s\r\n' % addr
+        request = 'APPE %s\r\n' % pathname
         resp = self.client.send_request(request)
-        assert resp == '200 Command okay'
-        assert self.client.data_sock.fileno() != -1
-
-        self.tearDown()
-        self.setUp()
-
-        addr = self.client.get_free_port()
-        request = 'PORT %s,%s\r\n' % addr
-        resp = self.client.send_request(request)
-        assert resp == '530 Not logged in'
-
-        self.tearDown()
-        self.setUp()
-
-        self.login()
-        addr = self.client.get_free_port()
-        request = 'PORT %s,%s\r\n' % addr
-        resp = self.client.send_request(request)
-        assert resp == '501 Syntax error in parameters or arguments'
-
-
+        self.assertEqual('125 Data connection already open; transfer starting', resp)
+        self.assertIsNotNone(self.client.data_sock)
+        with open('client_fs/index', 'rb') as f:
+            data = f.read()
+            quarter = len(data) // 4
+            self.client.send_data(data[:quarter])
+        resp = self.client.get_response()
+        self.assertEqual('226 Closing data connection.Requested file action successful', resp)
+        server_path = 'server_fs/%s' % pathname
+        with open('client_fs/index', 'rb') as source:
+            with open(server_path, 'rb') as target:
+                data = source.read()
+                quarter = len(data) // 4
+                self.assertEqual(data[:quarter]*2, target.read())
+        self.assertEqual(-1, self.client.data_sock.fileno())
 
 
 
