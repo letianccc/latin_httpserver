@@ -28,24 +28,19 @@ class FTPServer:
         return sock, fd
 
     def create_data_sock(self, client_addr, server_addr):
-        # if self.ctrl_handler.data_sock:
-        #     self.ctrl_handler.data_sock.close()
         sock = socket(AF_INET, SOCK_STREAM)
         sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
         sock.bind(server_addr)
-        fd = sock.fileno()
         try:
             sock.connect(client_addr)
-            sock.setblocking(True)
-            # self.register(sock)
-            # ctrl_fd = self.ctrl_handler.fd
-            # todo
-            # self.handlers[fd] = self.handlers[ctrl_fd]
-            # self.handlers[fd] = ControlHandler(sock, sock.fileno(), self)
         except ConnectionRefusedError:
             sock.close()
-            sock = None
-            fd = None
+            raise ConnectionRefusedError
+        fd = sock.fileno()
+        sock.setblocking(True)
+        self.register(sock)
+        ctrl_fd = self.ctrl_handler.sock.fileno()
+        self.handlers[fd] = self.handlers[ctrl_fd]
         return sock
 
 
@@ -85,7 +80,7 @@ class FTPServer:
 
     def handle_control(self, fd):
         self.set_handler(fd)
-        self.ctrl_handler.handle()
+        self.ctrl_handler.handle(fd)
 
     def set_handler(self, fd):
         # sock = self.sock_list[fd]
@@ -126,11 +121,13 @@ class FTPServer:
                 return True
         return False
 
-    def disconnect(self):
+    def disconnect(self, sock):
         # unregister 放在最后 因为test线程检测sock_list决定是否退出
-        fd = self.ctrl_handler.sock.fileno()
-        self.ctrl_handler.disconnect()
-        self.handlers.pop(fd)
+        # fd = self.ctrl_handler.sock.fileno()
+        fd = sock.fileno()
+        if sock == self.ctrl_handler.sock:
+            self.handlers.pop(fd)
+        self.ctrl_handler.disconnect(sock)
         sock = self.unregister(fd)
 
     def clear(self):
@@ -146,3 +143,6 @@ class FTPServer:
             sleep(0.01)
         self.clear()
         self.epoll_fd.close()
+
+    def get_handler(self):
+        return list(self.handlers.values())[0]

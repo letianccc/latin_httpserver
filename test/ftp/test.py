@@ -1,3 +1,4 @@
-import  os
-os.path.isfile(str(None))
-print(str(None))
+import os
+p = 'test'
+t = os.path.realpath(p)
+print(t)

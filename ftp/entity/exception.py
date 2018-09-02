@@ -14,3 +14,6 @@ class ServerError(Exception):
 
 class CommandError(Exception):
     pass
+
+class HandleError(Exception):
+    pass

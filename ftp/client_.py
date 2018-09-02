@@ -5,6 +5,7 @@ from errno import *
 from util import log
 from select import epoll, EPOLLIN
 import re
+from .config import BLOCK_PAYLOAD_CAPACITY
 
 class Client:
     def __init__(self, server_addr):
@@ -33,31 +34,63 @@ class Client:
     def send_data(self, data):
         if self.mode == 'S':
             self.data_sock.sendall(data)
-            self.data_sock.close()
+            self.disconnect_data()
         elif self.mode == 'B':
             self.store_in_block(data)
 
     def store_in_block(self, data):
-        payload_capacity = 65536
+        size = BLOCK_PAYLOAD_CAPACITY
         rest = data
+        tell = 0
         while rest:
-            data = rest[:payload_capacity]
-            rest = rest[payload_capacity:]
-            block = self.format_block(data, rest)
+            for i in range(5):
+                if rest:
+                    data = rest[:size]
+                    rest = rest[size:]
+                    block = self.format_block(data)
+                    # log(self.data_sock.fileno())
+                    self.data_sock.sendall(block)
+                    tell += len(data)
+            block = self.restart_mark_block(tell, rest)
             self.data_sock.sendall(block)
 
-    def format_block(self, payload, rest):
+
+    def format_block(self, payload, is_eof=False):
         eof_code = 64
         normal_code = 0
         eof_byte = (eof_code).to_bytes(1, 'big')
         normal_byte = (normal_code).to_bytes(1, 'big')
-        is_eof = rest == b''
         size = len(payload)
         count_field = (size).to_bytes(2, 'big')
         if is_eof:
             desc_field = eof_byte
         else:
             desc_field = normal_byte
+        block = desc_field + count_field + payload
+        return block
+
+    def restart_mark_block(self, position, rest):
+        eof_code = 64
+        restart_mark = 16
+        # eof_byte = (eof_code).to_bytes(1, 'big')
+        eof_mark = eof_code | restart_mark
+        eof_mark_byte = (eof_mark).to_bytes(1, 'big')
+        restart_mark_byte = (restart_mark).to_bytes(1, 'big')
+        is_eof = rest == b''
+        if position < 256:
+            size = 1
+        elif position < 65536:
+            size = 2
+        elif position < 16777216:
+            size = 3
+        elif position < 4294967296:
+            size = 4
+        payload = (position).to_bytes(size, 'big')
+        count_field = (size).to_bytes(2, 'big')
+        if is_eof:
+            desc_field = eof_mark_byte
+        else:
+            desc_field = restart_mark_byte
         block = desc_field + count_field + payload
         return block
 
@@ -85,8 +118,7 @@ class Client:
 
     def reinit(self):
         if self.data_sock:
-            self.data_sock.close()
-            self.data_sock = None
+            self.disconnect_data()
         if self.listen_sock:
             self.unregister(self.listen_sock.fileno())
             self.listen_sock.close()
@@ -99,7 +131,7 @@ class Client:
         while True:
             buf = self.data_sock.recv(self.recv_bufsize)
             if self.is_EOF(buf):
-                self.data_sock.close()
+                self.disconnect_data()
                 return data
             data += buf
 
@@ -172,25 +204,29 @@ class Client:
         self.listen_sock.close()
         self.listen_sock = None
 
+    # def send_request(self, request):
+    #     self.send_message(request)
+    #     resp = self.get_response(request)
+    #     return resp
+
     def send_request(self, request):
         self.send_message(request)
-        resp = self.get_response()
-        self.handle_response(request, resp)
-        return resp
 
-    def get_response(self):
+    def get_response(self, request):
         response = None
         while True:
             epoll_list = self.epoll_fd.poll()
             for fd, event in epoll_list:
                 if self.listen_sock and fd == self.listen_sock.fileno():
                     if self.data_sock:
-                        self.data_sock.close()
+                        self.disconnect_data()
                     self.data_sock, addr = self.listen_sock.accept()
                 else:
                     response = self.recv_response()
             if response:
-                return response
+                response = self.handle_response(request, response)
+                if response:
+                    return response
 
 
     def handle_response(self, request, response):
@@ -202,14 +238,21 @@ class Client:
         elif 'REIN' in request:
             if response == '220 Service ready for new user':
                 self.reinit()
-        # elif 'PORT' in request:
-        #     if response == '200 Command okay':
-        #         self.data_sock.close()
+        elif 'STOR' in request or 'STOU' in request or \
+                'APPE' in request or 'RETR' in request:
+            resps = response.split('\r\n')
+            pattern = '110 Restart marker reply MARK \w+ = (?P<server_marker>\w+)'
+            for resp in resps:
+                rs = re.match(pattern, resp)
+                if rs is not None:
+                    self.marker = rs.group('server_marker')
+                else:
+                    return resp
+        return response
 
     def reinit(self):
         if self.data_sock:
-            self.data_sock.close()
-            self.data_sock = None
+            self.disconnect_data()
         if self.listen_sock:
             self.unregister(self.listen_sock.fileno())
             self.listen_sock.close()
@@ -229,6 +272,11 @@ class Client:
     #             except BlockingIOError:
     #                 pass
     #
+
+    def disconnect_data(self):
+        self.data_sock.close()
+        self.data_sock = None
+
     def is_EOF(self, data_byte):
         return data_byte == b''
 
@@ -237,5 +285,5 @@ class Client:
         if self.listen_sock:
             self.listen_sock.close()
         if self.data_sock:
-            self.data_sock.close()
+            self.disconnect_data()
         # self.epoll_fd.close()

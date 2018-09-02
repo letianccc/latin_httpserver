@@ -1,9 +1,12 @@
 import re
 from .entity.user import User, session
+from .entity.exception import HandleError
+
 from util import log
 import socket
 import tempfile
 import os.path
+from .config import BLOCK_PAYLOAD_CAPACITY
 
 bufsize = 65536
 
@@ -25,6 +28,8 @@ class ControlHandler:
         self.server = server
         self.data_sock = None
         self.mode = 'S'
+        self.marker = 0
+        self.target_marker = 0
 
     def init(self):
         self.init_db()
@@ -44,22 +49,40 @@ class ControlHandler:
             'REIN': self.handle_REIN,
             'STOU': self.handle_TRAN,
             'APPE': self.handle_TRAN,
+            'DELE': self.handle_DELE,
+            'REST': self.handle_REST,
         }
 
-    def handle(self):
-        req = self.recv_message()
+    def handle(self, fd):
+        if fd != self.sock.fileno():
+            if self.data_sock.recv(1) == b'':
+                self.server.disconnect(self.data_sock)
+                return
+            else:
+                raise Exception
+        req = self.recv_request()
         if req == '':
-            self.server.disconnect()
+            self.server.disconnect(self.sock)
         else:
-            resp = self.make_response(req)
-            self.send_message(resp)
+            try:
+                resp = self.handle_request(req)
+                self.send_response(resp)
+            except ConnectionAbortedError as e:
+                resp = '426 Connection closed; transfer aborted'
+                self.send_response(resp)
+            except ConnectionRefusedError as e:
+                resp = '425 Can\'t open data connection'
+                self.send_response(resp)
+            except HandleError as e:
+                resp, = e.args
+                self.send_response(resp)
 
-    def make_response(self, request):
+    def handle_request(self, request):
         self.request = request
         pattern = '(?P<cmd>\w+)( (?P<arg>\S+))?\r\n'
         rs = re.match(pattern, request)
         if rs is None:
-            resp = '500 Syntax error, command unrecognized'
+            raise HandleError('500 Syntax error, command unrecognized')
             return resp
 
         rs = rs.groupdict()
@@ -74,10 +97,8 @@ class ControlHandler:
             else:
                 resp = handler(arg)
         else:
-            resp = '502 Command not implemented'
+            raise HandleError('502 Command not implemented')
         return resp
-
-
 
     def handle_USER(self, username):
         user = session.query(User).filter(User.name==username).first()
@@ -85,19 +106,19 @@ class ControlHandler:
             self.user_wait[self.sock] = user
             resp = '331 User name okay, need password'
         else:
-            resp = '530 Not logged in'
+            raise HandleError('530 Not logged in')
         return resp
 
     def handle_PASS(self, password):
         if self.sock not in self.user_wait:
-            resp = '503 Bad sequence of commands'
+            raise HandleError('503 Bad sequence of commands')
         else:
             user = self.user_wait[self.sock]
             if password == user.password:
                 self.login(user)
                 resp = '230 User logged in, proceed'
             else:
-                resp = '530 Not logged in'
+                raise HandleError('530 Not logged in')
         return resp
 
     def handle_PORT(self, addr):
@@ -106,23 +127,23 @@ class ControlHandler:
         port = int(addr[1])
         addr = (host, port)
         if not self.is_login():
-            resp = '530 Not logged in'
+            raise HandleError('530 Not logged in')
         else:
             if self.data_sock:
-                self.disconnect_data()
+                self.server.disconnect(self.data_sock)
             server_addr = self.sock.getsockname()[0], 20
             client_addr = addr
-            data_sock = self.server.create_data_sock(client_addr, server_addr)
-            if data_sock:
-                self.data_sock = data_sock
+            try:
+                self.data_sock = self.server.create_data_sock(client_addr, server_addr)
                 resp = '200 Command okay'
-            else:
-                resp = '501 Syntax error in parameters or arguments'
+            except ConnectionRefusedError:
+                raise HandleError('501 Syntax error in parameters or arguments')
+
         return resp
 
     def handle_MODE(self, mode):
         if not self.is_login():
-            resp = '530 Not logged in'
+            raise HandleError('530 Not logged in')
         else:
             resp = '200 Command okay'
             if mode == 'B-Block':
@@ -132,7 +153,7 @@ class ControlHandler:
             elif mode == 'C-Compressed':
                 self.mode = 'C'
             else:
-                resp = '501 Syntax error in parameters or arguments'
+                raise HandleError('501 Syntax error in parameters or arguments')
         return resp
 
     def handle_REIN(self, arg):
@@ -142,41 +163,66 @@ class ControlHandler:
 
     def handle_TRAN(self, command, filename):
         if not self.is_login():
-            return '530 Not logged in'
-        self.make_data_connect()
-        if not self.enable_data_connect():
-            return '425 Can\'t open data connection'
-        filename = self.get_filename(command, filename)
-        try:
-            if command == 'RETR':
-                self.retrive_file(command, filename)
+            raise HandleError('530 Not logged in')
+        if not self.is_connect_data():
+            self.make_data_connect()
+            if self.is_connect_data():
+                resp = '125 Data connection already open; transfer starting'
+                self.send_response(resp)
             else:
-                self.store_file(command, filename)
-        except ConnectionAbortedError:
-            return '426 Connection closed; transfer aborted'
-        except IOError:
-            return '451 Requested action aborted: local error in processing'
+                raise HandleError('425 Can\'t open data connection')
+        filename = self.get_filename(command, filename)
+        if command == 'RETR':
+            self.retrive_file(command, filename)
+        else:
+            self.store_file(command, filename)
 
         if self.mode == 'S':
             resp = '226 Closing data connection.Requested file action successful'
         elif self.mode == 'B':
             resp = '250 Requested file action okay, completed'
+        else:
+            raise Exception
         if command == 'STOU':
-            resp = '%s\r\n%s' % (resp, filename)
+            resp = '%s %s' % (resp, filename)
         return resp
 
-    def store_file(self, command, filename):
-        data = self.recv_data(self.data_sock)
-        if data == b'':
-            raise ConnectionAbortedError
-
+    def handle_DELE(self, filename):
+        if not self.is_login():
+            raise HandleError('530 Not logged in')
         path = '%s/%s' %(cur_dir, filename)
-        if command == 'STOR' or command == 'STOU':
-            mode = 'wb'
-        elif command == 'APPE':
-            mode = 'ab'
+        if not os.path.isfile(path):
+            raise HandleError('550 Requested action not taken.File unavailable')
+        else:
+            os.remove(path)
+            return '250 Requested file action okay, completed'
+
+    def handle_REST(self, marker):
+        if not self.is_login():
+            raise HandleError('530 Not logged in')
+        if self.marker < int(marker):
+            raise Exception(self.marker, marker)
+        self.target_marker = int(marker)
+        return '350 Requested file action pending further information'
+
+    def store_file(self, command, filename):
+        path = '%s/%s' %(cur_dir, filename)
+        mode = self.get_mode(command)
+        data = self.recv_data()
         with open(path, mode) as f:
+            f.seek(self.target_marker)
             f.write(data)
+        self.target_marker = 0
+
+    def get_mode(self, command):
+        if self.target_marker > 0:
+            mode = 'rb+'
+        else:
+            if command == 'STOR' or command == 'STOU':
+                mode = 'wb'
+            elif command == 'APPE':
+                mode = 'ab'
+        return mode
 
     def retrive_file(self, command, filename):
         path = '%s/%s' %(cur_dir, filename)
@@ -198,20 +244,10 @@ class ControlHandler:
         path = '%s/%s' % (cur_dir, filename)
         return not os.path.isfile(path)
 
-
     def make_data_connect(self):
         server_addr = self.sock.getsockname()[0], 20
         client_addr = self.sock.getpeername()
         self.data_sock = self.server.create_data_sock(client_addr, server_addr)
-
-        if self.data_sock:
-            resp = '125 Data connection already open; transfer starting'
-            self.send_message(resp)
-
-
-
-    def enable_data_connect(self):
-        return self.data_sock is not None
 
     def is_login(self):
         for sock in self.login_users.keys():
@@ -222,23 +258,33 @@ class ControlHandler:
     def login(self, user):
         self.login_users[self.sock] = user
 
-    def send_message(self, message):
+    def reinit(self):
+        if self.data_sock:
+            self.server.disconnect(self.data_sock)
+        self.user_wait = {}
+        self.login_users = {}
+        self.mode = 'S'
+
+    def send_response(self, message):
         data = message.encode()
         self.sock.sendall(data)
 
     def send_data(self, data):
         if self.mode == 'S':
-            self.data_sock.sendall(data)
-            self.data_sock.close()
+            self.send_stream(data)
         elif self.mode == 'B':
-            self.store_in_block(data)
+            self.send_block(data)
 
-    def store_in_block(self, data):
-        payload_capacity = 65536
+    def send_stream(self, data):
+        self.data_sock.sendall(data)
+        self.server.disconnect(self.data_sock)
+
+    def send_block(self, data):
+        size = BLOCK_PAYLOAD_CAPACITY
         rest = data
         while rest:
-            data = rest[:payload_capacity]
-            rest = rest[payload_capacity:]
+            data = rest[:size]
+            rest = rest[size:]
             block = self.format_block(data, rest)
             self.data_sock.sendall(block)
 
@@ -257,15 +303,13 @@ class ControlHandler:
         block = desc_field + count_field + payload
         return block
 
-    def recv_message(self, sock=None):
-        if sock is None:
-            sock = self.sock
+    def recv_request(self):
         data = b''
         try:
             while True:
-                buf = sock.recv(self.bufsize)
-                if self.is_EOF(buf):
-                    self.is_connected = False
+                buf = self.sock.recv(self.bufsize)
+                is_eof = buf == b''
+                if is_eof:
                     break
                 data += buf
         except BlockingIOError:
@@ -273,62 +317,62 @@ class ControlHandler:
         message = data.decode()
         return message
 
-    def recv_data(self, sock):
-        data = b''
+    def recv_data(self):
         if self.mode == 'S':
-            return self.recv_stream(sock)
+            data = self.recv_stream()
         elif self.mode == 'B':
-            return self.recv_block(sock)
+            data = self.recv_block()
+        if data == b'':
+            raise ConnectionAbortedError
+        return data
 
-    def recv_stream(self, sock):
+
+    def recv_stream(self):
         data = b''
         while True:
-            buf = sock.recv(self.bufsize)
+            buf = self.data_sock.recv(self.bufsize)
             data += buf
-            if self.is_EOF(buf):
-                sock.close()
+            is_eof = buf == b''
+            if is_eof:
+                self.server.disconnect(self.data_sock)
+                # self.disconnect_data()
                 return data
 
-    def recv_block(self, sock):
+    def recv_block(self):
         data = b''
+        restart_code = 16
         while True:
-            header = sock.recv(3)
+            header = self.data_sock.recv(3)
             desc = int.from_bytes(header[0:1], byteorder='big')
             count = int.from_bytes(header[1:3], byteorder='big')
-            payload = sock.recv(count)
-            disconnect = len(header) != 3 or len(payload) != count
-            if disconnect:
-                return ''
-            data += payload
-            if self.is_block_eof(desc):
+            payload = self.data_sock.recv(count)
+            is_disconnect = len(header) != 3 or len(payload) != count
+            if is_disconnect:
+                return b''
+            is_restart = desc & restart_code > 0
+            if is_restart:
+                self.marker = int.from_bytes(payload, byteorder='big')
+                resp = '110 Restart marker reply MARK %s = %s\r\n' % (self.marker, self.marker)
+                self.send_response(resp)
+            else:
+                data += payload
+            is_eof = desc & 64 > 0
+            if is_eof:
                 return data
 
+    def disconnect(self, sock):
+        if sock == self.sock:
+            self.disconnect_ctrl()
+        else:
+            self.disconnect_data()
 
-    def is_connected(self):
-        return self.conn_state
-
-    def disconnect(self):
+    def disconnect_ctrl(self):
         self.session.close()
         self.sock.close()
-        if self.data_sock:
-            self.data_sock.close()
 
     def disconnect_data(self):
         self.data_sock.close()
         self.data_sock = None
 
-    def reinit(self):
-        if self.data_sock:
-            self.data_sock.close()
-        self.user_wait = {}
-        self.login_users = {}
-        self.data_sock = None
-        self.mode = 'S'
-
-
-    def is_block_eof(self, desc):
-        return desc & 64 > 0
-
-
-    def is_EOF(self, data_byte):
-        return data_byte == b''
+    def is_connect_data(self):
+        return self.data_sock and self.data_sock.fileno() != -1
