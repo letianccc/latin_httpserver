@@ -2,7 +2,7 @@ from socket import *
 from random import randint
 from time import sleep
 from errno import *
-from util import log
+from .util import log
 from select import epoll, EPOLLIN
 import re
 from .config import BLOCK_PAYLOAD_CAPACITY

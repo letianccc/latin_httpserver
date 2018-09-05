@@ -30,12 +30,12 @@ class TestServer(unittest.TestCase):
 
     def setUp(self):
         self.server_addr = (SERVER_ADDR, SERVER_PORT)
-        self.thread = run_server(self.server_addr)
-        while not self.thread.server:
+        thread = run_server(self.server_addr)
+        while not thread.server:
             pass
 
     def tearDown(self):
-        self.thread.clear()
+        thread.clear()
 
     def test_200(self):
         url = '/'

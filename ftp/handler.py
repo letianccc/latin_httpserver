@@ -2,8 +2,8 @@ import re
 from .entity.user import User, session
 from .entity.exception import HandleError
 
-from util import log
-import socket
+# from .util import log
+# import socket
 import tempfile
 import os.path
 from .config import BLOCK_PAYLOAD_CAPACITY

@@ -1,6 +1,6 @@
 
 from ftp.server_ import FTPServer
-from config import *
+from .config import *
 
 
 def main():

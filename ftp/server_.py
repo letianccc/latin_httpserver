@@ -1,7 +1,7 @@
 
 from select import *
 from socket import *
-from util import log
+from .util import log
 import re
 from .entity.exception import CommandError
 from .handler import ControlHandler

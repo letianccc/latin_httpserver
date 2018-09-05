@@ -1,9 +1,13 @@
 # from server_ import HttpServer
 
 
-def main():
+from test.test_ftp import test_server
+
+def main1():
     # server = HttpServer()
     # server.run()
     pass
+    test_server.main()
 
-main()
+if __name__ == '__main__':
+    main1()
